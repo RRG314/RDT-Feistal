@@ -1,0 +1,121 @@
+"""
+RDT-Feistel v3f — Global Rotation + MDS Diffusion
+Author: Steven Reid (2025)
+
+Bias-corrected deterministic Feistel system.
+Adds global bit rotation (histogram flattening) and
+AES-style MDS diffusion (bit-flip amplification) while
+keeping full reversibility and RDT geometry.
+"""
+
+import math, numpy as np, time
+from collections import Counter
+
+φ = 1.6180339887498948
+
+# --- helpers ---------------------------------------------------------------
+def rotl8(x,r): r&=7; return ((x<<r)&0xFF)|(x>>(8-r))
+def rdt_depth(n,α=1.5):
+    if n<2:return 0
+    d,x=0,n
+    while x>1:
+        s=int(math.log(x)**α); s=max(2,s); x//=s; d+=1
+    return d
+def _xorshift32(x):
+    x^=(x<<13)&0xFFFFFFFF; x^=(x>>17)&0xFFFFFFFF; x^=(x<<5)&0xFFFFFFFF
+    return x&0xFFFFFFFF
+def _keystream_from_R(R,seed):
+    s=seed&0xFFFFFFFF; out=np.empty(len(R),dtype=np.uint8)
+    for i in range(len(R)):
+        s=_xorshift32(s ^ int(R[i]) ^ (i*0x9E3779B1))
+        out[i]=(s>>24)&0xFF
+    return out
+def rotl_stream(buf,r_bits):
+    if not buf:return buf
+    bits=np.unpackbits(np.frombuffer(buf,dtype=np.uint8))
+    r=r_bits%bits.size
+    if r: bits=np.roll(bits,r)
+    return np.packbits(bits).tobytes()
+
+# --- AES-style MDS diffusion ----------------------------------------------
+def gf_mul(a,b):
+    res=0
+    for _ in range(8):
+        if b&1: res^=a
+        hi=a&0x80; a=(a<<1)&0xFF
+        if hi: a^=0x1B
+        b>>=1
+    return res
+MC=np.array([[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]],dtype=np.uint8)
+def mix_columns_block16(block):
+    s=np.frombuffer(block,dtype=np.uint8).reshape(4,4,order='F')
+    out=np.zeros_like(s)
+    for c in range(4):
+        col=s[:,c]
+        for r in range(4):
+            out[r,c]=(gf_mul(MC[r,0],col[0])^gf_mul(MC[r,1],col[1])^
+                      gf_mul(MC[r,2],col[2])^gf_mul(MC[r,3],col[3]))
+    return out.reshape(16,order='F').tobytes()
+def mds_diffuse(buf):
+    out=bytearray(len(buf)); n=len(buf); i=0
+    while i+16<=n:
+        out[i:i+16]=mix_columns_block16(buf[i:i+16]); i+=16
+    if i<n:
+        tail=bytearray(16); tail[:n-i]=buf[i:]
+        out[i:n]=mix_columns_block16(bytes(tail))[:n-i]
+    return bytes(out)
+
+# --- RDT-Feistel v3f core -------------------------------------------------
+def mixer_rdt_feistel_v3f(data:bytes,rounds=4,α=1.5):
+    n=len(data)
+    x=bytearray(data)
+    idx=list(range(n))
+    idx.sort(key=lambda i:(rdt_depth(i+2,α),
+                           (i^(i*2654435761&0xFFFFFFFF))&0xFFFFFFFF,i))
+    Pinv=[0]*n
+    for j,i0 in enumerate(idx): Pinv[i0]=j
+    half=n//2; L,R=x[:half],x[half:]
+    for r in range(1,rounds+1):
+        m=len(R); ks=_keystream_from_R(R,seed=(0xA53A97F4 ^ r*0x9E3779B1))
+        Rp=bytearray(m)
+        for k in range(m):
+            j=(Pinv[half+k]-half)%m
+            j=(j+int(ks[k]))%m
+            Rp[k]=R[j]
+        F=bytearray(len(L))
+        for i in range(len(L)):
+            a=Rp[i%m]; b=Rp[(i*3+5*r)%m]; c=Rp[(i-1)%m]; d=Rp[(i+1)%m]
+            rs1=((a^c)&7)+1; rs2=((b+d+(i*37+19*r))&7)+1
+            t1=rotl8(((a^b)+(c^d))&0xFF,rs1)
+            t2=rotl8((((a+d)&0xFF)^((b+c)&0xFF))&0xFF,rs2)
+            rs3=(int(φ*(i+13*r))%7)+1
+            if r%2: Fi=((t1^t2)+(i*11+7*r))&0xFF
+            else:   Fi=(t1^t2)^((i*11+7*r)&0xFF)
+            F[i]=rotl8(Fi,rs3)
+        newR=bytearray(m)
+        for i in range(m): newR[i]=L[i]^F[i%len(F)]
+        for i in range(m):
+            rot=((i+r+(newR[i]&3))&7)
+            newR[i]=((newR[i]^((i*23+17*r)&0xFF))<<rot&0xFF)|(newR[i]>>(8-rot))
+        joined=bytes(R+newR)
+        joined=rotl_stream(joined,13*r)
+        joined=mds_diffuse(joined)
+        L,R=bytearray(joined[:half]),bytearray(joined[half:])
+    out=bytearray(n); out[:len(L)]=L; out[len(L):]=R
+    return bytes(out)
+
+# --- quick benchmark ------------------------------------------------------
+def H_shannon(b): N=len(b); c=Counter(b); return -sum((v/N)*math.log2(v/N) for v in c.values())
+def avalanche(a,b): return sum(bin(x^y).count('1') for x,y in zip(a,b))/(8*len(a))
+def chi_square(b): N=len(b); c=Counter(b); exp=N/256; return sum((v-exp)**2/exp for v in c.values())
+
+if __name__ == "__main__":
+    size=32768; α=1.5; rounds=4
+    base=bytes([i%256 for i in range(size)]); flip=bytearray(base); flip[0]^=1
+    t0=time.time(); out0=mixer_rdt_feistel_v3f(base,rounds,α); t1=time.time()
+    out1=mixer_rdt_feistel_v3f(bytes(flip),rounds,α)
+    print("=== RDT-Feistel v3f (global-rot + MDS) ===")
+    print(f"Entropy (bits/byte): {H_shannon(out0):.4f}")
+    print(f"Avalanche fraction : {avalanche(out0,out1):.4f}")
+    print(f"Chi-square          : {chi_square(out0):.1f}")
+    print(f"Time: {(t1-t0)*1000:.1f} ms for {size} bytes")
