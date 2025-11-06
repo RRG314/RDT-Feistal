@@ -1,0 +1,94 @@
+# RDT-Feistel Background
+
+## Concept Overview
+RDT-Feistel is a deterministic and reversible permutation system derived from
+Recursive Division Theory (RDT) — a mathematical framework that describes
+integer magnitude through recursive logarithmic division rather than
+factorization.
+
+In RDT, each integer *n* is assigned a recursive depth, defined as the number
+of iterations required to reduce *n* to 1 under a logarithmic division rule:
+
+    RDT(n) = number of iterations such that  
+    x_{i+1} = floor( x_i / max(2, floor((log x_i)^α)) )
+
+For large *n*, this depth grows proportionally to log(log n), forming a
+multi-scale hierarchy of recursive "shells."  
+This scaling law defines a bounded recursive geometry — slow-growing,
+self-similar, and structurally stable.
+
+---
+
+## Integration with a Feistel System
+A Feistel network provides a symmetric structure for reversible transformations.
+RDT-Feistel incorporates the recursive-depth law into its indexing and diffusion
+process as follows:
+
+1. **Index geometry:** each byte position is ranked by its recursive depth
+   RDT(i + 2, α). Positions sharing the same depth form shells that represent
+   similar logarithmic magnitude.
+
+2. **Permutation:** the right half of the data is reordered according to this
+   RDT-based geometry before each round.
+
+3. **Nonlinear mixing:** the left half is updated using a reversible
+   transformation F(L, R) that includes:
+   - Golden-ratio rotations (φ = 1.618...) for irrational offset,
+   - Modular arithmetic and position-dependent XOR operations,
+   - Optional global bit rotation and MDS (MixColumns-style) diffusion in the
+     enhanced **v3f** variant.
+
+These steps yield a deterministic permutation with near-uniform output
+statistics while remaining mathematically invertible.
+
+---
+
+## Mathematical Structure
+
+### Recursive Division Law
+For the standard parameter α ≈ 1.5, the expected recursive depth follows:
+
+    RDT(n) ≈ c * log(log n),  where  c ≈ 2.2
+
+This relationship defines the intrinsic rate of decay in the recursive process.
+When mapped to data indices, the Feistel network inherits this bounded,
+hierarchical scaling behavior.
+
+### Feistel Reversibility
+Each iteration satisfies:
+
+    L_{t+1} = R_t
+    R_{t+1} = L_t XOR F(R_t)
+
+where F is a bijective byte-wise transformation based on rotations and modular
+arithmetic. Because both halves are of equal length and every operation is
+reversible, the entire mapping remains a bijection over the input space.
+
+### Entropy Behavior
+The system converges toward a Shannon entropy of 8 bits per byte for structured
+input data. RDT-based index ordering induces multi-scale diffusion, while
+golden-ratio rotation prevents harmonic locking, producing a strong avalanche
+effect without relying on stochastic randomness.
+
+---
+
+## Physical Interpretation
+The recursive division law parallels the diffusive damping behavior observed in
+resistive magnetohydrodynamics (MHD). As MHD closure equations regulate magnetic
+energy through continuous diffusion, RDT-Feistel applies a discrete analog of
+recursive damping across data indices. This correspondence forms the conceptual
+basis for later integrations with energy-stabilized optimizers such as
+Topological Adam.
+
+---
+
+## Purpose
+RDT-Feistel serves as a mathematical prototype for exploring deterministic
+entropy growth, reversible diffusion, and recursive geometric structures in
+digital systems. It is not intended as an encryption mechanism but as a
+reproducible framework for studying structured entropy transformations and
+multi-scale diffusion dynamics.
+
+---
+
+**Author:** Steven Reid (2025)
